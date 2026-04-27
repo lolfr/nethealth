@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# py2app build artefacts
+build/
+dist/
+*.app
+
+# macOS
+.DS_Store
+*.swp
+
+# Build/release archives
+NetHealth.zip
+icon.iconset.zip
+
+# Local secrets / config user
+.env
+.env.local
+*.local
+
+# IDE
+.vscode/
+.idea/
