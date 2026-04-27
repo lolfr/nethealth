@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question d'usage
+    url: https://github.com/lolfr/nethealth/discussions
+    about: Pour les questions générales d'utilisation, ouvre plutôt une Discussion (à activer côté repo).
