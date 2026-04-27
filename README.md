@@ -157,7 +157,7 @@ C'est la valeur de la variable `DEVELOPER_ID` ci-dessous.
 ### Préparer l'environnement
 
 ```bash
-cd ~/Documents/Claude/Projects/Network\ Health\ macOS\ Pin
+cd path/to/nethealth     # repo root
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
@@ -302,7 +302,7 @@ Puis rebuild.
 Tant que le **bundle identifier** ne change pas (`eu.mylastnight.nethealth`), macOS conserve les permissions accordées (Location, etc.).
 
 ```bash
-cd ~/Documents/Claude/Projects/Network\ Health\ macOS\ Pin
+cd path/to/nethealth     # repo root
 source .venv/bin/activate
 
 osascript -e 'tell application "NetHealth" to quit' 2>/dev/null
