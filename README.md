@@ -15,6 +15,7 @@ L'idée centrale : sur Mac on a souvent plusieurs liens réseau actifs en même 
 - [Premier lancement](#premier-lancement)
 - [Configuration](#configuration)
 - [Mise à jour](#mise-à-jour)
+- [Notes de révision](#notes-de-révision)
 - [Désinstallation](#désinstallation)
 - [Emplacements utiles](#emplacements-utiles)
 - [Dépannage](#dépannage)
@@ -315,6 +316,39 @@ open /Applications/NetHealth.app
 ```
 
 Bumper `VERSION` dans `network_health.py` ET `APP_VERSION` dans `setup.py` à chaque build (utile pour distinguer dans les logs `>>> NetHealth v1.24 STARTING <<<`).
+
+---
+
+## Notes de révision
+
+Ne lister que les jalons. Les fixes mineurs intermédiaires (ex. `1.20 → 1.21 → 1.22`) sont volontairement omis — l'historique fin est dans `git log`.
+
+### v1.24 — clos / archivé · 2026-05-04
+
+- **Pre-check TP-Link par signature HTTP** (`_validate_m8550`) : remplace le simple connect TCP par un GET qui vérifie le header `Server` (`lighttpd`/`boa`), le body (`tp-link`), ou un fallback sur `/cgi/getParm` au format `var nn="…"`. Règle le faux positif sur les Wi-Fi tiers où la gateway répond aussi sur `192.168.1.1`.
+- **Mapping errno robuste** : `_unwrap_oserror` descend la chaîne d'exceptions `requests`/`urllib3` jusqu'au 1er `OSError` avec `errno` non-`None` (le wrapper extérieur étant lui-même un `OSError errno=None`, il fallait creuser).
+- Statut projet : **clos**. La suite logique est le bonding multi-uplinks (cf. `BONDING_CDC.md`).
+
+### v1.23 · 2026-04-25
+
+- **Score qualité daltonien-safe** : palette viridis + glyphes `✕◌○◎◉` au lieu d'un dégradé rouge/vert.
+- **Style d'icône configurable** (`pie` / `gauge` / `radar`), `gauge` retenu par défaut.
+- **Icône Finder reproductible** via `generate_app_icon.py` → `icon.icns` (plus de drag-drop manuel).
+- Ménage menu : `copy_ssid` et `request_location` retirés ; `open_location_prefs` conditionné sur l'OS.
+- `_humanize_router_error` mappe les exceptions `tplinkrouterc6u` vers des labels courts en français.
+
+### v1.19 → v1.22 (intermédiaires omis)
+
+Itérations de stabilisation : pre-check TCP côté TP-Link ajouté en 1.19 (le M8550 hors subnet bloquait toute la boucle pendant 30 s sur le timeout caché de la lib), puis ajustements CoreLocation, gestion du `<redacted>` SSID, exposition keychain pour le mot de passe routeur.
+
+### v1.16 · pre-check TCP socket-bound côté Wi-Fi
+
+- **Pre-check TCP par interface** avec `IP_BOUND_IF` : avant cette version, les `medium probe` séchaient en `curl rc=28` sur les ifaces sans route. Depuis, on tag l'iface comme injoignable proprement et on coupe court.
+- Mapping `curl rc → label lisible` (`timeout`, `pas de route`, `DNS KO`, etc.).
+
+### v1.0 → v1.15 (préhistoire, pas de notes détaillées)
+
+Mise au point progressive : énumération multi-iface via `networksetup`, classification (`wifi` / `iphone` / `ethernet`), score 0-100 (latence + perte + débit), ping cheap récurrent, medium probe round-robin, intégration `tplinkrouterc6u` pour le M8550, budget 5G horaire avec bascule en mode économique, popup macOS Location pour avoir le SSID en clair.
 
 ---
 

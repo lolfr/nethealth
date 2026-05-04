@@ -1,7 +1,11 @@
 # DIY Network Bonding — Cahier des charges
 
 > Document de travail, vivant. À relire / éditer à chaque décision structurante.
-> Statut : **ébauche** — à compléter / trancher avec Laurent au fil des semaines.
+> **Statut au 2026-05-04** : NetHealth (v1.24) est clos / archivé. Ce doc devient
+> autonome et porte désormais la Phase 2 du projet. Le couplage NetHealth ↔
+> bonding (jalon "Intégration NetHealth") est retiré : le pilotage de l'agrégat
+> se fera via les outils du concentrateur (Speedify console, ou Grafana sur Pi5
+> en cas de stack DIY).
 
 ## 1. Vision en une phrase
 
@@ -16,13 +20,31 @@ qu'un uplink seul, le tout en open-source et auto-hébergé.
   depuis n'importe où.
 - **Deux opérateurs mobiles différents** (iPhone chez l'un, TP-Link 5G chez l'autre)
   → la probabilité que **les deux** tombent en même temps est très faible.
-- **Fibre 10 Gb/s symétrique à la maison** → le backhaul domicile n'est pas le
-  goulot d'étranglement (même après agrégation, les uplinks mobiles cumulés
-  restent très en dessous).
-- **Infra Pi déjà en place** (Pi 2B avec pi-hole) → la mécanique d'auto-hébergement
-  est déjà familière, on capitalise dessus.
+- **Fibre symétrique à la maison** (Bouygues + IPv6 natif derrière UCG Express 7)
+  → le backhaul domicile n'est pas le goulot d'étranglement (même après
+  agrégation, les uplinks mobiles cumulés restent très en dessous).
+- **Pi5 déjà exposé en IPv6** + DNS wildcard Infomaniak + DDNS préfixe → un
+  endpoint internet est déjà prêt, plus besoin de prévoir un Pi 4 dédié comme
+  dans la 1re version de ce doc.
 - **Envie d'apprendre** → monter cette infra est un excellent terrain de jeu
   (réseau, VPN, routage, supervision), pas juste un objectif utilitaire.
+
+### 2bis. Limite matérielle Mac (mise à jour 2026-05-04)
+
+Une décision majeure a émergé en clôturant NetHealth : **un MacBook n'a qu'une
+seule radio Wi-Fi physique**, donc une seule association SSID à la fois. Il est
+**impossible** de bonder simultanément deux Wi-Fi (ex. Nostromo + Lolfr's Mobile)
+sans matériel additionnel. Conséquences sur l'arsenal d'uplinks :
+
+| Uplink                         | Comment l'attacher au Mac                       |
+|---|---|
+| Wi-Fi domicile (Nostromo)      | Carte interne                                    |
+| iPhone tethering               | USB-C, devient `enX` côté Mac                    |
+| TP-Link M8550 (5G)             | **Ethernet via dock USB-LAN** (pas en Wi-Fi simultané) |
+| 2e Wi-Fi externe               | Clé USB Wi-Fi (Alfa AWUS036ACM ou équivalent), optionnel |
+
+Le M8550 sur 192.168.1.1 reste joignable depuis le subnet domicile uniquement
+si on le câble. Pour la mobilité : prévoir le câble dock-LAN dans le sac.
 
 ## 3. Contraintes
 
@@ -40,122 +62,176 @@ qu'un uplink seul, le tout en open-source et auto-hébergé.
 ```
  ┌──────────── MOBILITÉ ────────────┐              ┌──────── DOMICILE ─────────┐
  │                                  │              │                           │
- │   ┌────────────┐   Wi-Fi ≈100 M  │              │                           │
+ │   ┌────────────┐   USB-C         │              │                           │
  │   │  iPhone    │ ─────────────┐  │              │                           │
  │   │  (op. 1)   │              │  │              │                           │
  │   └────────────┘              │  │              │                           │
  │                           ┌───▼──┴──┐    WG1    │   ┌───────────────┐       │
- │   ┌────────────┐  USB/WiFi│         │───UDP────►│   │  Raspberry Pi  │       │
- │   │ TP-Link 5G │──────────│ MacBook │───UDP────►│   │       4        │──────►│──► Internet
- │   │  (op. 2)   │          │   M4    │    WG2    │   │   (concentrateur)│      │  (via fibre 10G)
- │   └────────────┘          └─────────┘           │   └───────────────┘       │
- │                                                  │           │                │
- │  2+ interfaces physiques                         │   (routage NAT / WG)       │
- │  1 interface virtuelle utun                      │                            │
+ │   ┌────────────┐  USB-LAN │         │───UDP────►│   │  Raspberry Pi  │       │
+ │   │ TP-Link 5G │──────────│ MacBook │───UDP────►│   │       5        │──────►│──► Internet
+ │   │  (op. 2)   │          │         │    WG2    │   │  (concentrateur)│      │  (via fibre Bouygues)
+ │   └────────────┘          │         │           │   └───────────────┘       │
+ │                           │         │    WG3    │           │                │
+ │   ┌────────────┐  Wi-Fi   │         │───UDP────►│   (routage NAT / WG /      │
+ │   │ Wi-Fi tiers│──────────│         │           │    OpenMPTCProuter)        │
+ │   │ (hôtel…)   │          └─────────┘           │                            │
+ │   └────────────┘                                 │                            │
+ │                                                  │                            │
+ │  2-3 interfaces physiques                        │  Endpoint UDP exposé en   │
+ │  1 interface virtuelle utun                      │  IPv6 (déjà en place)     │
  └──────────────────────────────────────────────────┴────────────────────────────┘
 ```
 
-- **Côté MacBook** : une Network Extension présente une `utun` virtuelle ; tous
-  les paquets sortants y entrent et sont dispatchés vers les interfaces
-  physiques via plusieurs tunnels UDP parallèles (un tunnel WireGuard par
-  interface).
-- **Côté Pi** : reçoit les N tunnels, réassemble l'ordre, NAT vers la fibre,
-  gère la route de retour symétrique.
+- **Côté MacBook** : un client de bonding présente une iface virtuelle
+  (`utun`/`tun`) ; tous les paquets sortants y entrent et sont dispatchés vers
+  les interfaces physiques via plusieurs tunnels UDP parallèles. Selon le
+  produit : Network Extension custom (Swift), Speedify (commercial), ou client
+  WireGuard standard couplé à des règles `pf` côté Mac.
+- **Côté Pi5** : reçoit les N tunnels, réassemble, NAT vers la fibre, gère la
+  route de retour symétrique. Pi5 est **déjà** exposé en IPv6 et a un nom
+  stable (`watchtower.mylastnight.eu` pour la supervision, à compléter d'un
+  enregistrement dédié bonding).
 
 ## 5. Matériel
 
-### À acquérir
+### Déjà disponible (mise à jour 2026-05-04)
 
-| Item | Modèle recommandé | Prix indicatif | Justification |
-|---|---|---|---|
-| Raspberry Pi 4 | Pi 4 Model B 4 GB | 55-70 € | Gigabit Ethernet réel + 4 GB RAM = tu ne seras jamais contraint par le matériel |
-| microSD | Samsung Evo Plus 32 ou 64 Go (classe 10, A2) | 10 € | Ne pas rogner ici — la SD est la 1re cause de panne d'un Pi |
-| Boîtier ventilé | Argon NEO ou équivalent alu | 15-25 € | Dissipation passive suffisante pour charge constante |
-| Alim officielle 3 A USB-C | Officielle Raspberry Pi | 10 € | Alim low-cost = sous-tension = pannes aléatoires |
+- **Pi5** opérationnel, exposé IPv6, plein de services dessus → sert de
+  concentrateur. Pas besoin d'acheter un Pi 4 dédié comme prévu initialement.
+- **UCG Express 7** (Bouygues fibre) → port-forwarding UDP déjà supporté.
+- **Pi 2B** dédié pi-hole / DNS secondaire → laissé tranquille.
+- **iPhone** (op. 1) en tethering USB-C.
+- **TP-Link M8550** (op. 2) — accessible en Ethernet via dock USB-LAN.
+- **MacBook M4** + dock USB-C avec port LAN.
 
-Total estimé : **90-115 €**.
+### À envisager seulement si DIY confirmé
 
-### Déjà disponible
-
-- Fibre 10 Gb/s symétrique
-- Pi 2B (reste dédié à pi-hole, non touché par ce projet)
-- Switch / routeur domestique (à identifier : supporte-t-il la QoS ? port libre ?)
+| Item | Quand | Coût |
+|---|---|---|
+| Mini-PC dédié OpenMPTCProuter | si le Pi5 est trop chargé pour porter en plus le bonding | 100-200 € |
+| VPS sortie OpenMPTCProuter | si on veut une IP fixe stable hors résidentiel | 5-10 €/mois |
+| Clé USB Wi-Fi (Alfa AWUS036ACM) | si on veut bonder 2 Wi-Fi en mobilité | 50 € |
+| Câble Ethernet plat 1 m | obligatoire pour utiliser le M8550 en mobilité | 10 € |
 
 ## 6. Stack logicielle
 
-### Pi (serveur concentrateur)
+> 2026-05-04 : la stack DIY initiale (engarde / mptcpd / Network Extension)
+> reste valide *sur le papier*, mais on insère **avant** une phase de
+> validation produit (Speedify) pour s'assurer que l'expérience ciblée vaut
+> bien la complexité d'auto-héberger. Voir Phase 2A dans §7.
 
-| Couche | Choix retenu | Alternative |
+### Phase 2A — Validation par produit commercial (Speedify)
+
+| Couche | Choix |
+|---|---|
+| Client Mac | App Speedify officielle (gratuite, free tier 2 Go/mois) |
+| Concentrateur | Cloud Speedify — **rien à monter** |
+| Avantage | 5 minutes de setup, 0 dette technique |
+| Sortie produit | Confirmer/infirmer l'utilité réelle avant d'investir 2-3 jours en DIY |
+| Limite | Tout le trafic transite chez Speedify, pas idéal pour les flux sensibles |
+
+### Phase 2B — DIY auto-hébergé (si Speedify a validé l'usage)
+
+#### Pi5 (concentrateur)
+
+| Couche | Choix candidat | Alternative |
 |---|---|---|
-| OS | Raspberry Pi OS Lite 64-bit (Debian 12) | Ubuntu Server 24.04 |
-| Tunnel VPN | WireGuard (kernel-mode) | OpenVPN (plus lent) |
-| Bonding | **engarde** ou **mptcpd** | Script `pf`/`iptables` maison |
-| Supervision | `node_exporter` + Grafana Cloud (gratuit) | Netdata |
-| Durcissement | `fail2ban`, `ufw`, SSH clé uniquement | `nftables` à la main |
-| DNS dynamique | `ddclient` vers DuckDNS | IP fixe FAI si dispo |
+| OS | Raspberry Pi OS 64-bit (déjà en place) | — |
+| Tunnel VPN | WireGuard (kernel-mode) | OpenVPN (déjà en prod, mais plus lent) |
+| Bonding | **OpenMPTCProuter** ou WG+ECMP côté Pi5 | `engarde`, `mptcpd` |
+| Supervision | Grafana déjà en place sur l'infra | — |
+| Durcissement | Authentik / WireGuard clé only / IPv6 firewall (déjà en place) | — |
+| DNS dynamique | DDNS préfixe Infomaniak (déjà en place) | — |
 
-### MacBook (client)
+#### MacBook (client)
 
-| Couche | Choix retenu | Alternative |
+| Couche | Choix candidat | Alternative |
 |---|---|---|
-| Intégration OS | Network Extension (`NEPacketTunnelProvider`) | `pf` local + tunneling user-space |
-| Langage | Swift + PyObjC (Swift pour la Network Extension, Python pour monitoring) | Tout Swift |
-| UI | NetHealth multi-interfaces (étendu) | Nouvelle app dédiée |
-| Bonding client | Cohérent avec le choix Pi (engarde ou WG+custom) | Speedify comme comparatif |
+| Intégration OS | Client WireGuard standard + règles `pf` ciblées | Network Extension custom (Swift) — plus propre mais lourd à développer/signer/notariser |
+| Routage par destination | `pf` policy-based routing | App tierce (Surge ~50 €) |
+| UI / monitoring | Grafana web sur Pi5 (pas d'app Mac dédiée) — NetHealth étant clos | Mini-app menubar dédiée si besoin plus tard |
 
 ## 7. Jalons
 
-### Phase 0 — Préparation (1-2 semaines)
+> Refonte 2026-05-04 : phases 0/1 majoritairement réalisées par l'infra
+> existante, ajout d'une Phase 2A validation produit, le couplage NetHealth
+> est retiré.
 
-- [ ] Acheter le Pi 4 + accessoires
-- [ ] Flasher Raspberry Pi OS Lite 64
-- [ ] Durcir SSH (clé only, port non-standard, fail2ban)
-- [ ] Configurer firewall minimal (accepter seulement SSH + UDP WireGuard)
-- [ ] Mettre en place DDNS (DuckDNS) et vérifier la résolution
-- [ ] Tester le port forwarding UDP sur la box
+### Phase 0 — Préparation ✅ (déjà fait par l'infra existante)
 
-### Phase 1 — Tunnel simple WireGuard (1 semaine)
+- [x] Concentrateur en place (Pi5 + UCG Express 7 + IPv6 natif)
+- [x] DDNS / DNS wildcard (Infomaniak)
+- [x] SSH durci (clé only, fail2ban / Authentik selon services)
+- [ ] Vérifier que l'UCG laisse passer un port UDP supplémentaire pour WG
+- [ ] Tester explicitement la traversée NAT IPv4/IPv6 (selon opérateur mobile en sortie)
 
-Objectif : avoir **une seule** connexion VPN MacBook ↔ Pi, qui marche depuis
-l'extérieur. Sert de base saine avant d'empiler le bonding.
+### Phase 1 — Tunnel simple WireGuard Mac ↔ Pi5 (1 semaine)
 
-- [ ] Installer WireGuard côté Pi, générer clés + conf
+Objectif : avoir **une seule** connexion VPN MacBook ↔ Pi5 qui marche depuis
+l'extérieur. Sert de base saine avant d'empiler le bonding. Note : un OpenVPN
+existe déjà sur Bouygues (cf. `project_vpn_troubleshoot.md`), à comparer.
+
+- [ ] Installer WireGuard côté Pi5, générer clés + conf
 - [ ] Installer WireGuard côté Mac (app officielle ou CLI)
 - [ ] Vérifier le ping bidirectionnel et la traversée NAT
-- [ ] Mesurer latence + débit au travers (baseline)
+- [ ] Mesurer latence + débit au travers (baseline single-link)
+- [ ] Décider : on garde WG côté bonding ou on réutilise OpenVPN existant
 
-### Phase 2 — Bonding expérimental (2-4 semaines)
+### Phase 2A — Validation par Speedify (1-2 jours)
 
-- [ ] POC `engarde` avec 2 uplinks simulés (Wi-Fi domicile + smartphone en partage)
+Objectif : vérifier *avant tout DIY* que l'expérience d'avoir un lien bondé
+vaut la complexité — sur du vrai usage en mobilité.
+
+- [ ] Installer Speedify sur le Mac (free tier, 2 Go/mois)
+- [ ] Tester avec iPhone tethering + Wi-Fi domicile activés en parallèle
+- [ ] Tester avec iPhone tethering + M8550 (Ethernet via dock)
+- [ ] Évaluer : stabilité visio, vitesse perçue, basculement automatique
+- [ ] **Decision point** : l'expérience est-elle suffisamment au-dessus d'un
+      simple failover natif macOS (`networksetup -setnetworkserviceorder`)
+      pour justifier l'effort DIY de la Phase 2B ? Si non : on s'arrête là,
+      Speedify reste l'outil de référence ou on capitule sur le bonding.
+
+### Phase 2B — Bonding DIY auto-hébergé (si Phase 2A a convaincu) — 2-3 jours
+
+Deux variantes possibles, à trancher au début de la phase :
+
+**Variante 1 — OpenMPTCProuter sur Pi5** (si Pi5 a la capacité)
+- [ ] Vérifier la charge CPU/RAM disponible sur Pi5 (déjà chargé en services)
+- [ ] Installer OpenMPTCProuter / configurer un VPS de sortie
+- [ ] Bonder iPhone + M8550 + Wi-Fi domicile en mobilité
+
+**Variante 2 — WireGuard multi-tunnels + ECMP côté Pi5**
+- [ ] N tunnels WG (un par iface Mac) sortant vers Pi5
+- [ ] ECMP / load-balance par flux côté Pi5
+- [ ] Plus DIY mais plus contrôlable
+
 - [ ] Mesurer gain vs tunnel simple (débit, latence, stabilité à la reprise)
-- [ ] Si pas satisfaisant : tester alternatives (`mptcpd`, script maison)
-- [ ] Trancher la stack finale
+- [ ] Comparer à Speedify : la perte d'ergonomie vaut-elle l'autonomie ?
 
-### Phase 3 — Intégration NetHealth (1-2 semaines)
+### Phase 3 — Durcissement & exploitation (1 semaine)
 
-- [ ] Faire dialoguer NetHealth (monitoring) avec le bonding (contrôle)
-- [ ] Bouton menu « Activer / désactiver bonding »
-- [ ] Affichage en temps réel : quel % du trafic passe par chaque uplink
-
-### Phase 4 — Durcissement & auto (1-2 semaines)
-
-- [ ] `systemd` services pour relancer auto après crash
+- [ ] `systemd` services pour relance auto après crash
 - [ ] Rotation des logs
-- [ ] Alertes si le Pi n'est plus joignable (vers un canal Pushover / Telegram)
-- [ ] Documentation d'exploitation
+- [ ] Alertes via ntfy (`mln-infra` topic) si le Pi5 n'est plus joignable
+- [ ] Doc d'exploitation dans la knowledge base homelab
 
 ## 8. Décisions à prendre
 
-Questions ouvertes à trancher avant d'attaquer vraiment Phase 2 :
+Refonte 2026-05-04 — on remonte la décision la plus haute en premier :
 
-1. **engarde vs mptcpd vs maison ?** — engarde est le plus simple à déployer
-   aujourd'hui, mptcpd est plus « standard » mais moins pragmatique sur macOS.
-2. **UI client : Network Extension dédiée ou WG standard avec logique de
-   split côté Mac ?** — la Network Extension est plus propre mais demande un
-   dev Swift important.
-3. **Priorité de routage** : round-robin bête, ou basé sur la qualité mesurée
-   (santé de chaque uplink) ? Le 2e est plus intelligent mais nécessite un
-   feedback loop depuis NetHealth.
+1. **Speedify d'abord ou DIY directement ?** — fortement biaisé "Speedify
+   d'abord" : 5 minutes vs 2-3 jours, et règle la question existentielle "ai-je
+   vraiment besoin de bonding ?" avant tout investissement.
+2. **Si DIY : OpenMPTCProuter sur Pi5 ou WG+ECMP maison ?** — OMR est plus
+   complet et déjà packagé, mais c'est une stack lourde qui veut idéalement un
+   mini-PC dédié. WG+ECMP est plus léger et tient sur le Pi5 existant, au prix
+   d'un peu de routage manuel.
+3. **Si DIY : Network Extension Mac ou client WG standard + `pf` ?** — Network
+   Extension demande Swift + signature/notarisation à chaque rebuild ;
+   `pf` + WG officielle évite ce coût pour 90% du résultat.
+4. **Priorité de routage** : round-robin / load-balance / par-app ? À trancher
+   *après* la Phase 2A — Speedify gère ça automatiquement, ce qui donne un
+   benchmark.
 
 ## 9. Risques identifiés
 
@@ -169,24 +245,27 @@ Questions ouvertes à trancher avant d'attaquer vraiment Phase 2 :
 
 ## 10. Évolutions futures
 
-- **Bascule sur Mac mini** : quand le nouveau Mac mini arrive, migrer le
-  concentrateur bonding dessus (plus de CPU, pas de soucis de SD) et
-  redéployer le Pi 4 sur un autre usage.
-- **Multi-concentrateur** : plusieurs Pi à différents endroits (ex. un au bureau,
-  un à la maison) avec bascule auto selon la latence.
+- **Multi-concentrateur** : plusieurs Pi à différents endroits (ex. un au
+  bureau, un à la maison) avec bascule auto selon la latence.
 - **Exposer le bonding à d'autres appareils** : iPhone, iPad, tablette, via
   profil WireGuard partagé.
-- **Intégrer la mesure NetHealth** directement pour piloter le routage intelligent.
+- **Mini-PC OpenMPTCProuter dédié** : si le Pi5 sature, déporter le bonding
+  sur un mini-PC fanless (ex. N100) pour 100-200 €, libérer le Pi5.
+- **2e radio Wi-Fi** : ajouter une clé Alfa USB pour bonder 2 Wi-Fi simultanés
+  en mobilité (utile si à la fois le M8550 ne suffit pas et qu'on n'a pas de
+  port Ethernet pour le câbler).
 
 ## 11. Liens utiles
 
-- [`engarde`](https://github.com/porech/engarde) — bonding UDP multi-uplink en Go
+- [Speedify](https://speedify.com/) — produit commercial, free tier 2 Go/mois pour benchmarker
+- [OpenMPTCProuter](https://www.openmptcprouter.com/) — distribution Linux clé en main pour bonding multipath
+- [`engarde`](https://github.com/porech/engarde) — bonding UDP multi-uplink en Go (alternative Speedify, plus minimaliste)
 - [WireGuard](https://www.wireguard.com/) — VPN moderne, ultra-léger
-- [`mptcpd`](https://github.com/multipath-tcp/mptcpd) — daemon MPTCP
+- [`mptcpd`](https://github.com/multipath-tcp/mptcpd) — daemon MPTCP (Linux, peu utile sur Mac)
 - [Apple Network Extension](https://developer.apple.com/documentation/networkextension) — API officielle Apple
-- [DuckDNS](https://www.duckdns.org/) — DDNS gratuit
-- [Raspberry Pi 4 docs](https://www.raspberrypi.com/documentation/) — base officielle
+- [Surge for Mac](https://nssurge.com/) — proxy local Mac, routage par règles (~50 €)
 
 ---
 
-_Dernière mise à jour : à la création du document. À jour à chaque avancée._
+_Dernière mise à jour : 2026-05-04 — refonte post-clôture NetHealth, ajout
+Phase 2A Speedify, recentrage du concentrateur sur Pi5._
