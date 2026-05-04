@@ -77,6 +77,18 @@ OPTIONS = {
         "PIL",
         "tplinkrouterc6u",     # lib pip qui parle au routeur
     ],
+    # Paquets à exclure du bundle pour rester compact + accélérer py2app.
+    # Aucun n'est utilisé à runtime par network_health.py ni par les libs
+    # qu'on consomme (rumps, PIL, tplinkrouterc6u, requests, pycryptodome).
+    "excludes": [
+        "setuptools",
+        "pip",
+        "wheel",
+        "Crypto.SelfTest",
+        "PIL.tests",
+        "tests",
+        "test",
+    ],
     # Icône Finder/Dock générée par generate_app_icon.py — reprend les jauges
     # de la menubar (viridis) sur fond squircle navy.
     "iconfile": "icon.icns",
