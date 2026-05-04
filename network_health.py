@@ -161,7 +161,7 @@ def _dbg_write(msg):
 # Config
 # -----------------------------------------------------------------------------
 
-VERSION = "1.23"                                          # bump à chaque modif du script
+VERSION = "1.24"                                          # bump à chaque modif du script
 
 USER_CONFIG_PATH = Path.home() / ".nethealth_ssids.json"  # SSIDs ajoutés par l'utilisateur
 

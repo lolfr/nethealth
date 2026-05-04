@@ -13,13 +13,15 @@ des endpoints de tplinkrouterc6u. On consomme uniquement ce qui marche.
 from __future__ import annotations
 
 import logging
-import socket
+import re
 import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
+
+import requests
 
 log = logging.getLogger("nethealth.tplink")
 
@@ -28,10 +30,19 @@ KEYCHAIN_SERVICE = "eu.mylastnight.nethealth.tplink"
 USERNAMES_TO_TRY = ("user", "admin")
 CACHE_TTL_SEC = 30.0
 
-# Pre-check TCP : sans ça, `tplinkrouterc6u` timeout à 30 s par défaut
+# Pre-check HTTP : sans ça, `tplinkrouterc6u` timeout à 30 s par défaut
 # (paramètre non exposé), ce qui bloque le tick monitor à chaque tentative
-# quand le routeur n'est pas dans le subnet courant (Wi-Fi maison ≠ M8550).
-ROUTER_REACH_TIMEOUT_SEC = 2.0
+# quand un autre hôte répond aussi sur 192.168.1.1 (Wi-Fi tiers ≠ M8550).
+# (connect_timeout, read_timeout) — 2 s suffit largement en LAN.
+ROUTER_VALIDATE_TIMEOUT: tuple[float, float] = (2.0, 2.0)
+
+# Signatures distinctives d'un firmware M-series TP-Link (M8550 et cousins)
+_M8550_SERVER_TOKENS = ("lighttpd", "boa")
+_M8550_BODY_TOKEN = "tp-link"
+_M8550_PROBE_PATH = "/cgi/getParm"
+# Le probe renvoie des paires `var <ident>="<hex>"` (clé RSA + paramètres) sur
+# un firmware M-series ; un hôte tiers répond du HTML générique.
+_M8550_PROBE_RE = re.compile(r'var\s+(?:nn|ee|userSetting)\s*=\s*"', re.IGNORECASE)
 
 # Mapping network_type → label humain (extrait des firmwares M-series)
 _NETWORK_TYPE_LABELS = {
@@ -131,39 +142,96 @@ def _humanize_router_error(exc: Exception) -> str:
     return f"{name}: {msg[:60]}"
 
 
-def _reach_router(url: str, timeout: float = ROUTER_REACH_TIMEOUT_SEC) -> tuple[bool, str | None]:
-    """Pre-check TCP rapide vers le routeur. Retourne (ok, reason).
+def _errno_label(errno: int | None) -> str | None:
+    if errno in (50, 51, 65):
+        return "pas de route vers le routeur"
+    if errno == 61:
+        return "routeur refuse la connexion"
+    if errno == 64:
+        return "routeur down"
+    if errno == 49:
+        return "adresse routeur indisponible"
+    if errno is not None:
+        return f"routeur KO (errno {errno})"
+    return None
 
-    On essaie un connect TCP nu plutôt qu'un HEAD HTTP : ça discrimine
-    'pas de route' / 'pas dans le subnet' (timeout) de 'routeur up mais
-    paquets droppés'. 2 s suffisent largement en LAN, et coupent net
-    le timeout 30 s caché dans tplinkrouterc6u.
+
+def _unwrap_oserror(exc: BaseException) -> OSError | None:
+    """Descend la chaîne d'exceptions et renvoie le 1er OSError qui porte un
+    `errno` non-None. requests/urllib3 emballent l'erreur socket dans plusieurs
+    couches, dont la plus extérieure est elle-même un OSError (mais errno=None)
+    — il faut creuser jusqu'au ConnectionRefusedError/TimeoutError d'origine.
+    """
+    cur: BaseException | None = exc
+    seen: set[int] = set()
+    fallback: OSError | None = None
+    while cur is not None and id(cur) not in seen:
+        if isinstance(cur, OSError):
+            if cur.errno is not None:
+                return cur
+            if fallback is None:
+                fallback = cur
+        seen.add(id(cur))
+        cur = cur.__cause__ or cur.__context__
+    return fallback
+
+
+def _validate_m8550(
+    url: str,
+    timeout: tuple[float, float] = ROUTER_VALIDATE_TIMEOUT,
+) -> tuple[bool, str | None]:
+    """Pre-check HTTP : valide qu'on parle bien à un M8550 (ou firmware M-series
+    cousin), pas juste à un hôte qui répond sur le même IP.
+
+    On envoie un GET court et on cherche au moins une signature distinctive :
+      - header `Server` ∈ {lighttpd, boa}
+      - corps de page contenant 'TP-Link'
+      - endpoint `/cgi/getParm` répondant (signe propre aux firmwares M-series)
+
+    Discrimine 'rien ne répond' (timeout/no route) de 'quelque chose répond
+    mais pas mon routeur'. Les errno OS sont mappés en labels lisibles.
     """
     parsed = urlparse(url)
-    host = parsed.hostname
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    if not host:
+    if not parsed.hostname:
         return False, "URL routeur invalide"
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    base = url.rstrip("/")
     try:
-        s.settimeout(timeout)
-        s.connect((host, port))
-        return True, None
-    except socket.timeout:
+        resp = requests.get(base + "/", timeout=timeout, allow_redirects=False)
+    except requests.exceptions.ConnectTimeout:
         return False, "routeur injoignable (timeout)"
-    except OSError as exc:
-        if exc.errno in (50, 51, 65):
-            return False, "pas de route vers le routeur"
-        if exc.errno == 61:        # Connection refused
-            return False, "routeur refuse la connexion"
-        if exc.errno == 64:
-            return False, "routeur down"
-        return False, f"routeur KO (errno {exc.errno})"
-    finally:
-        try:
-            s.close()
-        except Exception:
-            pass
+    except requests.exceptions.ReadTimeout:
+        return False, "routeur ne répond pas (read timeout)"
+    except requests.exceptions.ConnectionError as exc:
+        os_exc = _unwrap_oserror(exc)
+        if os_exc is not None:
+            label = _errno_label(os_exc.errno)
+            if label:
+                return False, label
+        return False, "routeur injoignable"
+    except requests.exceptions.RequestException as exc:
+        return False, f"pre-check KO: {type(exc).__name__}"
+
+    server = (resp.headers.get("Server") or "").lower()
+    if any(tok in server for tok in _M8550_SERVER_TOKENS):
+        return True, None
+
+    body_sample = (resp.text or "")[:4096].lower() if resp.content else ""
+    if _M8550_BODY_TOKEN in body_sample:
+        return True, None
+
+    try:
+        probe = requests.get(
+            base + _M8550_PROBE_PATH,
+            timeout=timeout,
+            allow_redirects=False,
+        )
+        if probe.status_code == 200 and _M8550_PROBE_RE.search(probe.text or ""):
+            return True, None
+    except requests.exceptions.RequestException:
+        pass
+
+    return False, "hôte ≠ M8550 (signature absente)"
 
 
 class TplinkClient:
@@ -217,10 +285,11 @@ class TplinkClient:
                 self._cache, self._cache_ts = m, now
                 return m
 
-            # Pre-check 2 s : évite de sécher 30 s sur le timeout tplinkrouterc6u
-            # quand on n'est pas dans le subnet du routeur. On invalide la session
-            # ouverte aussi, parce qu'elle ne resservira pas dans cet état.
-            reach_ok, reach_err = _reach_router(self.url)
+            # Pre-check 2 s qui valide aussi l'identité du routeur (signature
+            # M-series), pour éviter le faux positif où une box tierce répond
+            # sur 192.168.1.1. Évite par la même occasion le timeout 30 s caché
+            # dans tplinkrouterc6u, et invalide la session ouverte si KO.
+            reach_ok, reach_err = _validate_m8550(self.url)
             if not reach_ok:
                 self._close_router()
                 m = TplinkMetrics(available=False, error=reach_err)

@@ -26,7 +26,7 @@ L'idée centrale : sur Mac on a souvent plusieurs liens réseau actifs en même 
 ### Ce qui s'affiche dans le menu
 
 ```
-NetHealth v1.22
+NetHealth v1.24
 Route active : Wi-Fi · Nostromo
 
 ★ ◉ Wi-Fi · 94% · 4ms · perte 0% · 45 Mbps↓
@@ -79,7 +79,7 @@ Un thread d'arrière-plan tourne en permanence (`_monitor_loop`), et exécute un
 1. **Énumère les interfaces** macOS via `networksetup -listallhardwareports` et `ifconfig`. Sépare ce qui a une IPv4 routable (`is_ready`) du standby (iPhone branché sans IP utile, Wi-Fi associé sans bail DHCP).
 2. **Ping** chaque interface (4 paquets vers Cloudflare 1.1.1.1) en bindant la source via `ping -S <ip>`.
 3. **Sonde "medium"** round-robin : 1 interface par cycle de 10 min, télécharge 1 MB Cloudflare via `curl --interface <dev>`. EWMA pour lisser. Précédée d'un **pre-check TCP 2 s** socket-bound (`IP_BOUND_IF=25` sur macOS) qui évite de sécher 8 s de download sur une iface sans route.
-4. **TP-Link M8550** (si Keychain renseigné) : récupère via `tplinkrouterc6u` les métriques radio + data consommée. Précédé d'un **pre-check TCP 2 s** sur le port 80 du routeur — sans ça, la lib timeout à 30 s par défaut quand le M8550 est hors subnet.
+4. **TP-Link M8550** (si Keychain renseigné) : récupère via `tplinkrouterc6u` les métriques radio + data consommée. Précédé d'un **pre-check HTTP 2 s** qui vérifie une signature M-series (header `Server` lighttpd/boa, balise TP-Link, ou `/cgi/getParm` avec format `var nn="…"`) — sans ça, la lib timeout à 30 s quand le M8550 est hors subnet, ou pire, parle à la box d'un Wi-Fi tiers qui répond aussi sur 192.168.1.1.
 5. **Speedtest Cloudflare** sur la route par défaut, toutes les 5 min, **uniquement** si la route n'est pas mobile et qu'on n'est pas en mode économique 5G.
 6. **Score qualité** par interface, agrégé en un health 0-1 (cf. plus bas).
 7. **Refresh icône** + menu via `_call_on_main()` (rumps + Cocoa main thread).
@@ -314,7 +314,7 @@ INSTALL=1 \
 open /Applications/NetHealth.app
 ```
 
-Bumper `VERSION` dans `network_health.py` ET `APP_VERSION` dans `setup.py` à chaque build (utile pour distinguer dans les logs `>>> NetHealth v1.22 STARTING <<<`).
+Bumper `VERSION` dans `network_health.py` ET `APP_VERSION` dans `setup.py` à chaque build (utile pour distinguer dans les logs `>>> NetHealth v1.24 STARTING <<<`).
 
 ---
 
@@ -356,11 +356,15 @@ Permission Location Services non accordée. Voir [Premier lancement](#premier-la
 
 ### Tous les `medium probe` échouent en `curl rc=28:`
 
-Tu tournes une version < 1.16. Rebuild en 1.22 — le pre-check TCP socket-bound + le mapping rc → label lisible (`timeout`, `pas de route`, `DNS KO`, etc.) sont absents avant.
+Tu tournes une version < 1.16. Rebuild en 1.24 — le pre-check TCP socket-bound + le mapping rc → label lisible (`timeout`, `pas de route`, `DNS KO`, etc.) sont absents avant.
 
 ### TP-Link `ConnectTimeout` 30 s à chaque tick
 
-Idem : il manque le pre-check TCP routeur (1.19+). Le M8550 hors subnet bloquait toute la boucle. Rebuild résout.
+Idem : il manque le pre-check routeur (TCP en 1.19+, HTTP-signature en 1.24+). Le M8550 hors subnet bloquait toute la boucle. Rebuild résout.
+
+### TP-Link répond mais les métriques sont vides / `session HTTP cassée`
+
+Sur 1.23 et avant, le pre-check était un simple connect TCP : sur un Wi-Fi tiers où la gateway répond aussi sur 192.168.1.1, on parlait à la mauvaise box et `tplinkrouterc6u` enchaînait 4 endpoints HTTP qui foiraient. Depuis 1.24 le pre-check valide une signature M-series (header `Server` ∈ {lighttpd, boa}, ou body TP-Link, ou `/cgi/getParm` retournant `var nn="…"`). Si la signature est absente, on remonte `hôte ≠ M8550 (signature absente)` au lieu de tenter la session.
 
 ### L'app est installée mais l'icône reste à l'ancienne version
 

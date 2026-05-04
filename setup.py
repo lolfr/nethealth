@@ -30,7 +30,7 @@ Notes techniques importantes :
 from setuptools import setup
 
 APP_NAME = "NetHealth"
-APP_VERSION = "1.23"
+APP_VERSION = "1.24"
 APP_BUNDLE_ID = "eu.mylastnight.nethealth"
 
 APP = ["network_health.py"]
